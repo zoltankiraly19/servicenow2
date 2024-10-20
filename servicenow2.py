@@ -2,16 +2,26 @@ from flask import Flask, request, jsonify, session
 import requests
 from flask_cors import CORS
 from flask_session import Session
+import redis
 
 app = Flask(__name__)
 CORS(app)
 
-# Flask-Session konfiguráció
-app.config['SESSION_TYPE'] = 'filesystem'
-app.config['SECRET_KEY'] = 's3cr3t_k3y'  # Ezt a titkos kulcsot egyéni és biztonságos jelszóra kell cserélni
+# Flask-Session konfiguráció távoli Redis szerverhez
+app.config['SESSION_TYPE'] = 'redis'
+app.config['SECRET_KEY'] = '4b3403665fea6b0e932b892dbf89d87c'  # Fixen generált titkos kulcs
 app.config['SESSION_PERMANENT'] = False
+app.config['SESSION_USE_SIGNER'] = True
+app.config['SESSION_REDIS'] = redis.StrictRedis(
+    host='redis-16699.c56.east-us.azure.redns.redis-cloud.com',  # Redis Public endpoint host
+    port=16699,  # Redis port
+    password='D4ZDXMAVCuwzYnNJKHStIP6BfLJFYxOf',  # Redis jelszó
+    ssl=True,  # SSL titkosítás a biztonság érdekében
+    decode_responses=True  # Biztosítja, hogy a Redis JSON válaszait helyesen kezelje
+)
 Session(app)
 
+# Token lekérése ServiceNow-tól
 @app.route('/get_token', methods=['POST'])
 def get_token():
     data = request.json
@@ -33,6 +43,7 @@ def get_token():
     else:
         return jsonify({"error": "Authentication failed", "details": response.text}), 400
 
+# ServiceNow adatok lekérése
 @app.route('/get_servicenow_data', methods=['POST'])
 def get_servicenow_data():
     if 'access_token' not in session:
@@ -76,6 +87,7 @@ def get_servicenow_data():
     # Nem küldünk vissza adatokat, csak jelzést, hogy a lekérés sikeres volt
     return jsonify({"message": "ServiceNow data retrieved and stored successfully."}), 200
 
+# Jegy létrehozása a ServiceNow-ban
 @app.route('/create_ticket', methods=['POST'])
 def create_ticket():
     if 'access_token' not in session:
