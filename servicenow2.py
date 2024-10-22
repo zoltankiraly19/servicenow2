@@ -19,8 +19,9 @@ cos = ibm_boto3.client(
 # Helper function to store session data in IBM COS
 def store_session_data(file_name, data):
     try:
-        print(f"Storing {file_name} in Cloud Object Storage...")
-        cos.put_object(Bucket='elekteszt', Key=file_name, Body=data)
+        print(f"Storing {file_name} in Cloud Object Storage with data: {data}")
+        response = cos.put_object(Bucket='elekteszt', Key=file_name, Body=data)
+        print(f"Store response: {response}")
     except ClientError as e:
         print(f"Error storing {file_name}: {e}")
 
