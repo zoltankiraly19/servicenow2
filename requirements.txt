@@ -2,5 +2,4 @@ Werkzeug
 flask
 requests
 flask-cors
-Flask-Session
-redis
+ibm-cos-sdk
