@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect, url_for
 import requests
 from flask_cors import CORS
 import ibm_boto3
@@ -19,36 +19,26 @@ cos = ibm_boto3.client(
 # Helper function to store session data in IBM COS
 def store_session_data(file_name, data):
     try:
-        print(f"Storing {file_name} in Cloud Object Storage with data: {data}")
-        response = cos.put_object(Bucket='elekteszt', Key=file_name, Body=data)
-        print(f"Store response: {response}")
+        cos.put_object(Bucket='elekteszt', Key=file_name, Body=data)
     except ClientError as e:
         print(f"Error storing {file_name}: {e}")
 
 # Helper function to retrieve session data from IBM COS
 def get_session_data(file_name):
     try:
-        print(f"Attempting to retrieve {file_name} from Cloud Object Storage...")
         response = cos.get_object(Bucket='elekteszt', Key=file_name)
         data = response['Body'].read().decode('utf-8')
-        print(f"Retrieved {file_name} with data: {data}")
         return data
     except ClientError as e:
         print(f"Error retrieving {file_name}: {e}")
         return None
 
-@app.route('/')
-def login():
-    return jsonify({"message": "Please provide username and password"})
-
+# 1. Token megszerzése és háttérben adatlekérés
 @app.route('/get_token', methods=['POST'])
 def get_token():
     request_data = request.json
     username = request_data.get('username')
     password = request_data.get('password')
-
-    if not username or not password:
-        return jsonify({"error": "Missing username or password"}), 400
 
     auth_data = {
         'grant_type': 'password',
@@ -62,64 +52,63 @@ def get_token():
 
     if response.status_code == 200:
         access_token = response.json().get('access_token')
+
+        # Adatok tárolása IBM COS-ban
         store_session_data(f'{username}_token', access_token)
-        store_session_data(f'{username}_id', username)
-        return jsonify({"access_token": access_token}), 200
+
+        # Felhasználó sys_id lekérése és tárolása COS-ban
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        response_user = requests.get(
+            f"https://dev227667.service-now.com/api/now/table/sys_user?sysparm_query=user_name={username}",
+            headers=headers
+        )
+
+        if response_user.status_code == 200:
+            users = response_user.json().get('result', [])
+            if users:
+                current_caller_id = users[0].get("sys_id")
+                store_session_data(f'{username}_caller_id', current_caller_id)
+
+        # Assignment groupok és priorities lekérése és tárolása
+        response_groups = requests.get(
+            'https://dev227667.service-now.com/api/now/table/sys_user_group',
+            headers=headers
+        )
+        if response_groups.status_code == 200:
+            groups = response_groups.json().get('result', [])
+            assignment_groups = [{"name": group["name"], "sys_id": group["sys_id"]} for group in groups]
+            store_session_data(f'{username}_assignment_groups', str(assignment_groups))
+
+        response_priorities = requests.get(
+            'https://dev227667.service-now.com/api/now/table/sys_choice?sysparm_query=name=incident^element=priority',
+            headers=headers
+        )
+        if response_priorities.status_code == 200:
+            priorities = [{"label": priority["label"], "value": priority["value"]} for priority in response_priorities.json().get('result', [])]
+            store_session_data(f'{username}_priorities', str(priorities))
+
+        # A háttérfolyamat után irányítás a jegy létrehozási oldalra
+        return jsonify({"message": "Data retrieved and token stored successfully"}), 200
     else:
         return jsonify({"error": "Authentication failed", "details": response.text}), 400
 
-@app.route('/get_servicenow_data', methods=['POST'])
-def get_servicenow_data():
-    request_data = request.json
-    username = request_data.get('username')
-
-    access_token = get_session_data(f'{username}_token')
-    if access_token is None:
-        return jsonify({"error": "Token not available"}), 400
-
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json'
-    }
-
-    # Fetch assignment groups
-    response_groups = requests.get('https://dev227667.service-now.com/api/now/table/sys_user_group', headers=headers)
-    if response_groups.status_code == 200:
-        groups = response_groups.json().get('result', [])
-        assignment_groups = [{"name": group["name"], "sys_id": group["sys_id"]} for group in groups]
-        store_session_data(f'{username}_assignment_groups', str(assignment_groups))
-    else:
-        return jsonify({"error": "Failed to retrieve assignment groups"}), 400
-
-    # Fetch priorities
-    response_priorities = requests.get(
-        'https://dev227667.service-now.com/api/now/table/sys_choice?sysparm_query=name=incident^element=priority',
-        headers=headers)
-    if response_priorities.status_code == 200:
-        priorities = [{"label": priority["label"], "value": priority["value"]} for priority in response_priorities.json().get('result', [])]
-        store_session_data(f'{username}_priorities', str(priorities))
-    else:
-        return jsonify({"error": "Failed to retrieve priorities"}), 400
-
-    return jsonify({"message": "Data retrieved successfully"}), 200
-
+# 2. Jegy létrehozása
 @app.route('/create_ticket', methods=['POST'])
 def create_ticket():
     request_data = request.json
     username = request_data.get('username')
+    short_description = request_data.get('short_description')
+    assignment_group_sys_id = request_data.get('assignment_group_sys_id')
+    priority = request_data.get('priority')
 
     access_token = get_session_data(f'{username}_token')
     current_caller_id = get_session_data(f'{username}_caller_id')
 
-    if access_token is None:
-        return jsonify({"error": "Token not available"}), 400
-
-    if current_caller_id is None:
-        return jsonify({"error": "Caller ID not available"}), 400
-
-    short_description = request_data.get('short_description')
-    assignment_group_sys_id = request_data.get('assignment_group_sys_id')
-    priority = request_data.get('priority')
+    if not access_token or not current_caller_id:
+        return jsonify({"error": "Token or Caller ID not available. Please authenticate first."}), 400
 
     headers = {
         'Authorization': f'Bearer {access_token}',
