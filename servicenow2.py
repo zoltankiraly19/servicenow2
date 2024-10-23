@@ -1,8 +1,9 @@
-from flask import Flask, request, jsonify, redirect, url_for
+from flask import Flask, request, jsonify
 import requests
 from flask_cors import CORS
 import ibm_boto3
 from ibm_botocore.client import Config, ClientError
+import json
 
 app = Flask(__name__)
 CORS(app)
@@ -19,7 +20,9 @@ cos = ibm_boto3.client(
 # Helper function to store session data in IBM COS
 def store_session_data(file_name, data):
     try:
-        cos.put_object(Bucket='elekteszt', Key=file_name, Body=data)
+        # Convert list or dictionary data to JSON string
+        json_data = json.dumps(data)
+        cos.put_object(Bucket='elekteszt', Key=file_name, Body=json_data)
     except ClientError as e:
         print(f"Error storing {file_name}: {e}")
 
@@ -28,7 +31,8 @@ def get_session_data(file_name):
     try:
         response = cos.get_object(Bucket='elekteszt', Key=file_name)
         data = response['Body'].read().decode('utf-8')
-        return data
+        # Convert JSON string back to Python object
+        return json.loads(data)
     except ClientError as e:
         print(f"Error retrieving {file_name}: {e}")
         return None
@@ -72,7 +76,7 @@ def get_token():
                 current_caller_id = users[0].get("sys_id")
                 store_session_data(f'{username}_caller_id', current_caller_id)
 
-        # Assignment groupok és priorities lekérése és tárolása
+        # Assignment groupok és prioritások lekérése és tárolása JSON formátumban
         response_groups = requests.get(
             'https://dev227667.service-now.com/api/now/table/sys_user_group',
             headers=headers
@@ -80,7 +84,7 @@ def get_token():
         if response_groups.status_code == 200:
             groups = response_groups.json().get('result', [])
             assignment_groups = [{"name": group["name"], "sys_id": group["sys_id"]} for group in groups]
-            store_session_data(f'{username}_assignment_groups', str(assignment_groups))
+            store_session_data(f'{username}_assignment_groups', assignment_groups)
 
         response_priorities = requests.get(
             'https://dev227667.service-now.com/api/now/table/sys_choice?sysparm_query=name=incident^element=priority',
@@ -88,14 +92,29 @@ def get_token():
         )
         if response_priorities.status_code == 200:
             priorities = [{"label": priority["label"], "value": priority["value"]} for priority in response_priorities.json().get('result', [])]
-            store_session_data(f'{username}_priorities', str(priorities))
+            store_session_data(f'{username}_priorities', priorities)
 
-        # A háttérfolyamat után irányítás a jegy létrehozási oldalra
         return jsonify({"message": "Data retrieved and token stored successfully"}), 200
     else:
         return jsonify({"error": "Authentication failed", "details": response.text}), 400
 
-# 2. Jegy létrehozása
+# 2. Csoportok és prioritások lekérdezése a jegy létrehozása előtt
+@app.route('/get_ticket_data', methods=['GET'])
+def get_ticket_data():
+    username = request.args.get('username')
+
+    assignment_groups = get_session_data(f'{username}_assignment_groups')
+    priorities = get_session_data(f'{username}_priorities')
+
+    if assignment_groups and priorities:
+        return jsonify({
+            "assignment_groups": assignment_groups,
+            "priorities": priorities
+        }), 200
+    else:
+        return jsonify({"error": "No data available"}), 404
+
+# 3. Jegy létrehozása
 @app.route('/create_ticket', methods=['POST'])
 def create_ticket():
     request_data = request.json
